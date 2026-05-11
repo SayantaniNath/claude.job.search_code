@@ -152,11 +152,40 @@ def search_jobs():
     print(f"\n  Total raw jobs scraped: {len(df)}")
     return df
 
+# ── Visa restriction keywords — filter these jobs OUT ──────────────────────
+VISA_RESTRICTED_KEYWORDS = [
+    "must be a us citizen",
+    "must be us citizen",
+    "us citizens only",
+    "usc only",
+    "green card only",
+    "security clearance required",
+    "secret clearance",
+    "top secret",
+    "ts/sci",
+    "dod clearance",
+    "federal clearance",
+    "must have green card",
+    "permanent resident only",
+    "gc only",
+    "no visa candidates",
+    "no opt candidates",
+    "no cpt candidates",
+    "citizens and green card",
+]
+
+def is_visa_restricted(description, title):
+    """Return True if job is restricted to citizens/GC only."""
+    text = f"{title} {description}".lower()
+    return any(keyword in text for keyword in VISA_RESTRICTED_KEYWORDS)
+
 def process_jobs(df):
     if df.empty:
         return df
 
     results = []
+    visa_filtered = 0
+
     for _, row in df.iterrows():
         title = str(row.get("title", ""))
         description = str(row.get("description", ""))
@@ -166,10 +195,22 @@ def process_jobs(df):
         if not is_relevant_location(location, is_remote):
             continue
 
+        # Filter out visa-restricted jobs
+        if is_visa_restricted(description, title):
+            visa_filtered += 1
+            continue
+
         score, matched_keywords = score_job(title, description)
 
         if score < 20:
             continue
+
+        # Check if job explicitly welcomes EAD/work authorisation
+        ead_friendly = any(phrase in description.lower() for phrase in [
+            "ead", "work authorization", "work authorisation",
+            "authorized to work", "no sponsorship required",
+            "all visa", "any visa", "l2", "l-2"
+        ])
 
         results.append({
             "match_score": score,
@@ -179,12 +220,15 @@ def process_jobs(df):
             "is_remote": "Yes" if is_remote else "No",
             "job_type": row.get("job_type", ""),
             "salary": format_salary(row.get("min_amount"), row.get("max_amount"), description),
+            "ead_friendly": "✅ Yes" if ead_friendly else "Check",
             "date_posted": row.get("date_posted", ""),
             "apply_url": row.get("job_url", ""),
             "source": row.get("site", ""),
             "matched_keywords": ", ".join(matched_keywords[:10]),
             "description_snippet": description[:400].replace("\n", " "),
         })
+
+    print(f"  Visa-restricted jobs filtered out: {visa_filtered}")
 
     result_df = pd.DataFrame(results)
     if not result_df.empty:
@@ -222,6 +266,7 @@ def main():
         print(f"Company:  {row['company']}")
         print(f"Location: {row['location']} | Remote: {row['is_remote']}")
         print(f"Salary:   {row['salary']}")
+        print(f"Visa OK:  {row['ead_friendly']}")
         print(f"Posted:   {row['date_posted']}")
         print(f"Keywords: {row['matched_keywords']}")
         print(f"Apply:    {row['apply_url']}")
@@ -229,9 +274,12 @@ def main():
 
     # Summary stats
     with_salary = results[results["salary"] != "Not listed"]
-    print(f"\nTotal matches found:     {len(results)}")
-    print(f"Jobs with salary listed: {len(with_salary)}")
-    print(f"Full results saved to:   {filename}")
+    ead_friendly = results[results["ead_friendly"] == "✅ Yes"]
+    print(f"\nTotal matches found:          {len(results)}")
+    print(f"Jobs with salary listed:      {len(with_salary)}")
+    print(f"EAD/visa-friendly confirmed:  {len(ead_friendly)}")
+    print(f"Note: 'Check' jobs are likely fine for L2 EAD — just not explicitly stated")
+    print(f"Full results saved to:        {filename}")
 
 if __name__ == "__main__":
     main()
