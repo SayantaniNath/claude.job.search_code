@@ -31,8 +31,9 @@ RESUME_SKILLS = [
     "data vault", "star schema", "snowflake schema", "kimball", "olap", "oltp",
     "scd", "slowly changing dimension", "data governance", "mdm",
     "data quality", "data lineage",
-    # Cloud & architecture
-    "cloud", "cloud-native", "distributed", "streaming", "aws", "azure", "gcp",
+    # Cloud & architecture — azure removed 2026-06-12: she has no Azure
+    # experience and it was inflating scores for Azure-stack roles.
+    "cloud", "cloud-native", "distributed", "streaming", "aws", "gcp",
     # Soft/domain
     "banking", "healthcare", "finance", "fintech", "enterprise",
     "performance tuning", "query optimization", "partitioning", "indexing",
@@ -222,12 +223,73 @@ def is_visa_restricted(description, title):
     text = f"{title} {description}".lower()
     return any(keyword in text for keyword in VISA_RESTRICTED_KEYWORDS)
 
+# ── Qualification filters (added 2026-06-12) ────────────────────────────────
+# She has a B.Tech (no MS/PhD) and no Azure experience — drop jobs that hard-
+# require either. "Bachelor's or Master's" phrasing is fine; Azure as a
+# nice-to-have is fine. Only requirement-style language triggers the drop.
+ADV_DEGREE_RE = re.compile(
+    r"(?:master'?s|m\.s\.|ph\.?d)[^.\n]{0,60}(?:required|must)"
+    r"|(?:required|requires|must have|must hold|minimum of)[^.\n]{0,60}(?:master'?s|m\.s\.|ph\.?d)",
+    re.IGNORECASE,
+)
+BACHELOR_RE = re.compile(r"bachelor|b\.s\.|\bbs\b|b\.?tech", re.IGNORECASE)
+AZURE_REQUIRED_RE = re.compile(
+    r"azure[^.\n]{0,60}(?:required|is a must|must have)"
+    r"|(?:required|requires|must have|proficien\w+ in|expertise in|strong experience (?:in|with))[^.\n]{0,60}azure",
+    re.IGNORECASE,
+)
+
+def requires_advanced_degree(description):
+    """MS/PhD demanded with no bachelor's alternative anywhere in the posting."""
+    return bool(ADV_DEGREE_RE.search(description)) and not BACHELOR_RE.search(description)
+
+def requires_azure(title, description):
+    """Azure in the title, or required-style Azure language in the description."""
+    return "azure" in title.lower() or bool(AZURE_REQUIRED_RE.search(description))
+
+# ── Preferred sectors: top-tier tech, banks/fintech, healthcare ─────────────
+TOP_TIER_COMPANIES = [
+    "google", "meta", "apple", "amazon", "netflix", "microsoft", "nvidia",
+    "databricks", "snowflake", "salesforce", "slack", "stripe", "airbnb",
+    "uber", "lyft", "linkedin", "openai", "anthropic", "adobe", "atlassian",
+    "datadog", "doordash", "pinterest", "block", "square", "walmart",
+    "servicenow", "workday", "intuit", "oracle", "ibm", "cisco", "tesla",
+]
+BANK_FINTECH_KEYWORDS = [
+    "bank", "jpmorgan", "j.p. morgan", "citi", "wells fargo", "goldman",
+    "morgan stanley", "capital one", "american express", "amex", "visa",
+    "mastercard", "paypal", "plaid", "chime", "robinhood", "fidelity",
+    "charles schwab", "blackrock", "fintech", "payments",
+]
+HEALTHCARE_KEYWORDS = [
+    "health", "medical", "pharma", "biotech", "clinical", "hospital",
+    "lilly", "pfizer", "iqvia", "cvs", "unitedhealth", "kaiser", "genentech",
+]
+
+def classify_domain(company, description):
+    """Tag the sector so preferred companies surface first downstream."""
+    c = (company or "").lower()
+    if any(name in c for name in TOP_TIER_COMPANIES):
+        return "top-tier"
+    if any(kw in c for kw in BANK_FINTECH_KEYWORDS):
+        return "bank/fintech"
+    if any(kw in c for kw in HEALTHCARE_KEYWORDS):
+        return "healthcare"
+    d = (description or "").lower()
+    if any(kw in d for kw in ("fintech", "banking", "financial services")):
+        return "bank/fintech"
+    if any(kw in d for kw in ("healthcare", "health care", "life sciences")):
+        return "healthcare"
+    return ""
+
 def process_jobs(df):
     if df.empty:
         return df
 
     results = []
     visa_filtered = 0
+    degree_filtered = 0
+    azure_filtered = 0
 
     for _, row in df.iterrows():
         title = str(row.get("title", ""))
@@ -241,6 +303,14 @@ def process_jobs(df):
         # Filter out visa-restricted jobs
         if is_visa_restricted(description, title):
             visa_filtered += 1
+            continue
+
+        # Filter out jobs she isn't qualified for / doesn't want
+        if requires_advanced_degree(description):
+            degree_filtered += 1
+            continue
+        if requires_azure(title, description):
+            azure_filtered += 1
             continue
 
         score, matched_keywords = score_job(title, description)
@@ -267,11 +337,14 @@ def process_jobs(df):
             "date_posted": row.get("date_posted", ""),
             "apply_url": row.get("job_url", ""),
             "source": row.get("site", ""),
+            "domain": classify_domain(str(row.get("company", "")), description),
             "matched_keywords": ", ".join(matched_keywords[:10]),
             "description_snippet": description[:400].replace("\n", " "),
         })
 
     print(f"  Visa-restricted jobs filtered out: {visa_filtered}")
+    print(f"  MS/PhD-required jobs filtered out: {degree_filtered}")
+    print(f"  Azure-required jobs filtered out:  {azure_filtered}")
 
     result_df = pd.DataFrame(results)
     if not result_df.empty:

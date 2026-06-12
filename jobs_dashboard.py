@@ -51,6 +51,10 @@ def load_jobs():
     df = df[df["title"].astype(str).str.contains(TITLE_RE)]
     df = df[~df["apply_url"].isin(seen)]
 
+    # No Azure roles — she has no Azure experience. Newer CSVs are already
+    # filtered by the matcher; the title check also covers older CSVs.
+    df = df[~df["title"].astype(str).str.contains("azure", case=False)]
+
     loc = df["location"].astype(str)
     is_remote = df["is_remote"].astype(str).str.lower().isin(["true", "1", "yes"]) | \
         loc.str.contains("remote", case=False)
@@ -60,11 +64,17 @@ def load_jobs():
     cutoff = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
     df = df[df["date_posted"].notna() & (df["date_posted"].astype(str) >= cutoff)]
 
-    df = df.sort_values("match_score", ascending=False)
+    # Preferred sectors (top-tier tech, banks/fintech, healthcare) sort first.
+    if "domain" not in df.columns:
+        df["domain"] = ""
+    df["domain"] = df["domain"].fillna("")
+    df["_pref"] = (df["domain"] != "").astype(int)
+    df = df.sort_values(["_pref", "match_score"], ascending=False)
 
     jobs = []
     for _, r in df.iterrows():
         jobs.append({
+            "domain": str(r.get("domain", "") or ""),
             "score": int(r.get("match_score", 0) or 0),
             "title": str(r.get("title", "")),
             "company": str(r.get("company", "")),
@@ -118,6 +128,9 @@ PAGE = """<!DOCTYPE html>
   .job-title {{ font-size: 16px; font-weight: 700; }}
   .job-title a {{ color: var(--text); text-decoration: none; }}
   .job-title a:hover {{ color: var(--accent-light); }}
+  .domain {{ font-size: 10px; font-weight: 700; text-transform: uppercase; color: var(--cyan);
+             border: 1px solid rgba(6,182,212,0.4); padding: 1px 7px; border-radius: 999px;
+             margin-left: 8px; vertical-align: middle; white-space: nowrap; }}
   .score {{ font-size: 12px; font-weight: 700; color: var(--green);
             border: 1px solid rgba(16,185,129,0.4); padding: 2px 9px; border-radius: 999px;
             white-space: nowrap; }}
@@ -140,6 +153,7 @@ PAGE = """<!DOCTYPE html>
     <button data-days="3">Last 3 days</button>
     <button data-days="7" class="active">Last week</button>
     <button id="sfToggle">SF / hybrid only</button>
+    <button id="prefToggle">Preferred sectors</button>
     <input id="search" placeholder="Search title or company…">
   </div>
   <div class="count" id="count"></div>
@@ -148,13 +162,14 @@ PAGE = """<!DOCTYPE html>
 <script>
 const JOBS = {jobs_json};
 const GENERATED = new Date("{generated_iso}");
-let days = 7, sfOnly = false, q = "";
+let days = 7, sfOnly = false, prefOnly = false, q = "";
 
 function render() {{
   const cutoff = new Date(GENERATED - days * 864e5);
   const rows = JOBS.filter(j => {{
     if (new Date(j.posted) < cutoff) return false;
     if (sfOnly && !j.sf) return false;
+    if (prefOnly && !j.domain) return false;
     if (q && !(j.title + " " + j.company).toLowerCase().includes(q)) return false;
     return true;
   }});
@@ -163,7 +178,8 @@ function render() {{
   document.getElementById("list").innerHTML = rows.length ? rows.map(j => `
     <div class="job">
       <div class="job-head">
-        <div class="job-title"><a href="${{j.url}}" target="_blank">${{j.title}} — ${{j.company}}</a></div>
+        <div class="job-title"><a href="${{j.url}}" target="_blank">${{j.title}} — ${{j.company}}</a>
+          ${{j.domain ? `<span class="domain">${{j.domain}}</span>` : ""}}</div>
         <div class="score">${{j.score}} match</div>
       </div>
       <div class="job-sub">${{j.location || "Location n/a"}} · <b>${{j.salary || "Salary not listed"}}</b>
@@ -181,6 +197,9 @@ document.querySelectorAll("[data-days]").forEach(b => b.onclick = () => {{
 }});
 document.getElementById("sfToggle").onclick = e => {{
   sfOnly = !sfOnly; e.target.classList.toggle("active", sfOnly); render();
+}};
+document.getElementById("prefToggle").onclick = e => {{
+  prefOnly = !prefOnly; e.target.classList.toggle("active", prefOnly); render();
 }};
 document.getElementById("search").oninput = e => {{ q = e.target.value.toLowerCase(); render(); }};
 render();
