@@ -2,13 +2,21 @@
 LinkedIn Job Matcher for Sayantani Nath
 Searches jobs across LinkedIn and Indeed
 Scores and ranks by resume match
-Filters: San Francisco Bay Area + US Remote/Hybrid
+Filters: based on SEARCH_MODE below
 """
 
 from jobspy import scrape_jobs
 import pandas as pd
 from datetime import datetime
 import re
+
+# ── Search Configuration ────────────────────────────────────────────────────
+# "remote_only"   — only true-remote US roles. Tightest filter.
+# "sf_relocated"  — SF onsite/hybrid + any US location + remote. Broadest.
+#                   Use this if (a) you've relocated to SF, or (b) you're
+#                   pre-relocation but want a bigger sample size to measure
+#                   recruiter behavior (e.g. testing L2 visa response rates).
+SEARCH_MODE = "sf_relocated"
 
 # ── Resume keywords extracted from Sayantani's resume ──────────────────────
 RESUME_SKILLS = [
@@ -68,13 +76,35 @@ def score_job(title, description):
     return score, matched
 
 def is_relevant_location(location, is_remote):
-    """Keep SF Bay Area, US remote, hybrid, or any major US city jobs."""
+    """Keep jobs based on SEARCH_MODE.
+
+    Tightened 2026-05-19 because LinkedIn/Indeed often tag jobs `is_remote=True`
+    while the location field still names a specific US city (e.g. "Houston, TX").
+    For someone in India, those city-located "remote" tags are unreliable
+    proxies — often the role is hybrid at the HQ city. So in remote_only mode
+    we require an EXPLICIT remote signal in the location string OR an empty
+    location with the API's remote flag — not a US city + remote flag.
+    """
+    loc = (location or "").lower().strip()
+
+    if SEARCH_MODE == "remote_only":
+        # Gold standard: explicit "remote" / "anywhere" / "work from home" in
+        # the location string. Trust this.
+        explicit_remote = any(k in loc for k in ("remote", "anywhere", "work from home"))
+        if explicit_remote:
+            return True
+        # Empty / generic location + API says remote: provisionally trust.
+        if is_remote and (not loc or loc == "nan" or loc in ("united states", "usa", "us")):
+            return True
+        # API flagged remote but the location names a specific US city: drop.
+        # These are usually "remote at HQ city" hybrids in disguise.
+        return False
+
+    # sf_relocated mode: original behavior, accept any major US location.
     if is_remote:
         return True
-    if not location:
+    if not loc:
         return False
-    loc = location.lower()
-    # Accept any US location since role can be remote/hybrid
     us_indicators = [
         "san francisco", "bay area", "remote", "hybrid", "california", ", ca",
         "new york", "seattle", "chicago", "austin", "boston", "denver",
@@ -111,21 +141,24 @@ def search_jobs():
 
     for title in TARGET_JOB_TITLES:
         print(f"  Searching: {title}...")
-        try:
-            # SF Bay Area jobs (on-site + hybrid)
-            sf_jobs = scrape_jobs(
-                site_name=["linkedin", "indeed"],
-                search_term=title,
-                location="San Francisco Bay Area, CA",
-                results_wanted=30,
-                hours_old=168,  # last 7 days
-                country_indeed="USA",
-                linkedin_fetch_description=True,
-                is_remote=False,
-            )
-            all_jobs.append(sf_jobs)
-        except Exception as e:
-            print(f"    SF search error for {title}: {e}")
+
+        # Skip the SF Bay onsite/hybrid search in remote_only mode. Halves the
+        # API calls and keeps the pool clean of roles she can't take from India.
+        if SEARCH_MODE != "remote_only":
+            try:
+                sf_jobs = scrape_jobs(
+                    site_name=["linkedin", "indeed"],
+                    search_term=title,
+                    location="San Francisco Bay Area, CA",
+                    results_wanted=30,
+                    hours_old=168,  # last 7 days
+                    country_indeed="USA",
+                    linkedin_fetch_description=True,
+                    is_remote=False,
+                )
+                all_jobs.append(sf_jobs)
+            except Exception as e:
+                print(f"    SF search error for {title}: {e}")
 
         try:
             # US Remote jobs
@@ -172,6 +205,16 @@ VISA_RESTRICTED_KEYWORDS = [
     "no opt candidates",
     "no cpt candidates",
     "citizens and green card",
+    # Added 2026-05-18 after SailPoint slipped through with FedRAMP language.
+    "fedramp",
+    "us citizenship",
+    "u.s. citizenship",
+    "citizenship is required",
+    "citizenship required",
+    "requires us citizenship",
+    "requires u.s. citizenship",
+    "requires citizenship",
+    "citizenship requirement",
 ]
 
 def is_visa_restricted(description, title):
@@ -239,7 +282,7 @@ def main():
     print("=" * 60)
     print("Job Matcher — Sayantani Nath")
     print("Roles: Data Engineer / Architect / Modeler / Warehouse")
-    print("Location: SF Bay Area + All US Remote/Hybrid")
+    print(f"Mode: {SEARCH_MODE}")
     print("=" * 60)
 
     print("\nSearching jobs (this takes 3-5 minutes)...\n")
