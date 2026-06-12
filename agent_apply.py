@@ -1,12 +1,14 @@
 """
-Stage 2 job-application agent.
+Stage 2+3 job-application agent.
 
 Usage:
-    python agent_apply.py <apply_url>
+    python agent_apply.py <apply_url> [resume_path]
 
 Opens the URL in a visible Chrome window, scans the page for text inputs,
-fills the ones it can match against profile.yaml, then stops. You review,
-handle dropdowns / file uploads / free-text questions, and click submit.
+fills the ones it can match against profile.yaml, uploads the resume
+(per-job tailored one if passed as the 2nd arg), drafts free-text answers
+and a cover letter with Claude (Stage 3 — requires ANTHROPIC_API_KEY),
+then stops. You review everything and click submit yourself.
 The script never submits on your behalf.
 """
 
@@ -246,8 +248,11 @@ def upload_files(page, profile):
 
 
 # ── Part E: drive the page ─────────────────────────────────────────────────
-def run(url):
+def run(url, resume_override=None):
     profile = load_profile()
+    if resume_override:
+        profile["resume_path"] = resume_override
+        print(f"→ Using per-job resume: {resume_override}")
     rules = build_rules(profile)
 
     with sync_playwright() as p:
@@ -317,6 +322,30 @@ def run(url):
                 sig = field_signal(el).strip()
                 skipped.append((el, sig if sig else "<unlabeled field>"))
 
+        # Stage 3: if the form has a cover-letter upload and no letter is
+        # configured, draft one with Claude and save it as .docx first, so the
+        # upload pass below picks it up. Page text doubles as the JD context.
+        try:
+            page_context = page.title() + "\n" + page.evaluate("document.body.innerText")
+        except Exception:
+            page_context = ""
+        cover_drafted = None
+        if not profile.get("cover_letter_path") and llm_answers.api_key_available():
+            has_cover_input = any(
+                matches_keyword(
+                    f"{(el.get_attribute('name') or '')} {(el.get_attribute('id') or '')} "
+                    f"{(el.get_attribute('aria-label') or '')}".lower(), "cover")
+                for el in page.query_selector_all("input[type=file]")
+            )
+            if has_cover_input and page_context:
+                try:
+                    letter = llm_answers.draft_cover_letter(page_context, profile)
+                    if letter:
+                        profile["cover_letter_path"] = llm_answers.save_cover_letter_docx(letter, profile)
+                        cover_drafted = profile["cover_letter_path"]
+                except Exception as e:
+                    print(f"⚠️  Cover letter drafting failed: {str(e)[:120]}")
+
         # File uploads (resume, cover letter). Wrap defensively — a flaky
         # upload pass should never prevent the summary from printing.
         try:
@@ -338,10 +367,6 @@ def run(url):
             print("⚠️  ANTHROPIC_API_KEY not set — free-text questions left blank.")
             free_text = []
         if free_text:
-            try:
-                page_context = page.title() + "\n" + page.evaluate("document.body.innerText")
-            except Exception:
-                page_context = ""
             for el, sig in free_text:
                 try:
                     answer = llm_answers.draft_answer(sig, page_context, profile)
@@ -370,6 +395,10 @@ def run(url):
             print(f"  ✓ {kind:14} → {path}")
             print(f"    (matched field: {display})")
         print()
+        if cover_drafted:
+            print(f"COVER LETTER drafted by Claude → {cover_drafted}")
+            print("  (uploaded to the form — open the file and review before submitting)")
+            print()
         print(f"DRAFTED BY CLAUDE ({len(drafted)}) — REVIEW AND EDIT BEFORE SUBMIT:")
         for sig, answer in drafted:
             display = (sig[:50] + "…") if len(sig) > 50 else sig
@@ -388,7 +417,7 @@ def run(url):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print("Usage: python agent_apply.py <apply_url>")
+    if len(sys.argv) not in (2, 3):
+        print("Usage: python agent_apply.py <apply_url> [resume_path]")
         sys.exit(1)
-    run(sys.argv[1])
+    run(sys.argv[1], sys.argv[2] if len(sys.argv) == 3 else None)

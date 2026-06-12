@@ -88,5 +88,66 @@ def draft_answer(question, page_context, profile):
     return text
 
 
+def draft_cover_letter(page_context, profile):
+    """Full cover letter for forms with a cover-letter upload field. Returns the
+    letter text, or None if there isn't enough job context to write one."""
+    import anthropic
+
+    client = anthropic.Anthropic()
+    resume = load_resume_text()
+
+    system = (
+        "You write job-application cover letters for the candidate, first person. Hard rules:\n"
+        "- Ground every claim in the resume below. NEVER invent experience, employers, "
+        "metrics, or technologies.\n"
+        "- 250-320 words, 3-4 paragraphs. Address 'Dear Hiring Manager'.\n"
+        "- Lead with fit for THIS role using the job page; pick the 2-3 strongest "
+        "matching experiences, not a resume recital.\n"
+        "- Include: authorized to work in the US, no sponsorship required (L2 EAD).\n"
+        "- If the page has no usable job description, reply with exactly: SKIP\n\n"
+        f"CANDIDATE RESUME:\n{resume}"
+    )
+
+    response = client.messages.create(
+        model=MODEL,
+        max_tokens=16000,
+        thinking={"type": "adaptive"},
+        system=system,
+        messages=[{
+            "role": "user",
+            "content": f"JOB PAGE:\n{page_context[:MAX_PAGE_CONTEXT]}\n\nWrite the cover letter.",
+        }],
+    )
+    text = next((b.text for b in response.content if b.type == "text"), "").strip()
+    return None if (text == "SKIP" or not text) else text
+
+
+def save_cover_letter_docx(text, profile):
+    """Save the letter as .docx via macOS textutil (HTML → docx). Returns the
+    docx path, or the .html path if conversion fails (still uploadable on most ATSes)."""
+    import subprocess
+    from datetime import datetime
+
+    out_dir = Path.home() / "Downloads/cover_letters"
+    out_dir.mkdir(exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M")
+    html_path = out_dir / f"Cover_Letter_{stamp}.html"
+
+    paragraphs = "".join(f"<p>{p}</p>" for p in text.split("\n\n"))
+    html_path.write_text(
+        f"<html><body style='font-family: Georgia, serif; font-size: 11pt;'>"
+        f"<p>{profile['full_name']}<br>{profile['email']}</p>{paragraphs}</body></html>"
+    )
+    docx_path = html_path.with_suffix(".docx")
+    try:
+        subprocess.run(
+            ["textutil", "-convert", "docx", str(html_path), "-output", str(docx_path)],
+            check=True, capture_output=True,
+        )
+        return str(docx_path)
+    except Exception:
+        return str(html_path)
+
+
 def api_key_available():
     return bool(os.environ.get("ANTHROPIC_API_KEY"))
